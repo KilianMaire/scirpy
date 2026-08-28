@@ -1,5 +1,6 @@
 # pylama:ignore=W0611,W0404
 import itertools
+import logging
 
 import numpy as np
 import numpy.testing as npt
@@ -1119,7 +1120,6 @@ _HILL_COUNTS = {
 }
 
 
-@pytest.mark.extra
 @pytest.mark.parametrize("mudata", [False, True], ids=["AnnData", "MuData"])
 def test_hill_diversity_profile(mudata):
     import warnings
@@ -1130,76 +1130,60 @@ def test_hill_diversity_profile(mudata):
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # the happy path must not warn
-        res = ir.tl.hill_diversity_profile(adata, groupby="group", target_col="clonotype_", q_min=0, q_max=2, q_step=1)
+        profile, assessment = ir.tl.hill_diversity_profile(
+            adata, groupby="group", target_col="clonotype_", q_min=0, q_max=2, q_step=1
+        )
+
+    assert assessment.verdict == "reliable"
 
     # the adapter must reproduce hillrep's coverage-standardized estimate exactly
-    ref = hillrep.compare(_HILL_COUNTS, level="coverage", q=[0.0, 1.0, 2.0], n_boot=0)
-    expected = ref.pivot(index="order_q", columns="assemblage", values="qD")
-
-    assert list(res.columns) == ["A", "B"]
-    for q in (0.0, 1.0, 2.0):
-        for grp in ("A", "B"):
-            npt.assert_allclose(res.loc[q, grp], expected.loc[q, grp], rtol=1e-9)
+    expected = hillrep.compare(_HILL_COUNTS, level="coverage", q=[0.0, 1.0, 2.0], n_boot=0)
+    pdt.assert_frame_equal(profile, expected)
 
 
-@pytest.mark.extra
 def test_hill_diversity_profile_warns_when_not_comparable():
     # group "A" is heavily undersampled with no doubletons: a fair comparison is not supported
     counts = {"A": [3, 1, 1, 1, 1], "B": [120, 60, 40, 30, 20, 12, 8, 5, 3, 2, 1, 1]}
     adata = _adata_from_counts(counts)
-    with pytest.warns(UserWarning, match="cannot be compared"):
-        ir.tl.hill_diversity_profile(adata, groupby="group", target_col="clonotype_")
+
+    # scanpy logs through its own root logger, which `caplog` does not see
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    sc.settings._root_logger.addHandler(handler)
+    try:
+        _, assessment = ir.tl.hill_diversity_profile(adata, groupby="group", target_col="clonotype_")
+    finally:
+        sc.settings._root_logger.removeHandler(handler)
+
+    assert assessment.verdict != "reliable"
+    assert any("cannot be compared" in r.getMessage() for r in records)
 
 
-@pytest.mark.extra
 def test_convert_hill_table():
     adata = _adata_from_counts(_HILL_COUNTS)
-    profile = ir.tl.hill_diversity_profile(adata, groupby="group", target_col="clonotype_", q_min=0, q_max=2, q_step=1)
+    profile, _ = ir.tl.hill_diversity_profile(
+        adata, groupby="group", target_col="clonotype_", q_min=0, q_max=2, q_step=1
+    )
 
-    div = ir.tl.convert_hill_table(profile, convert_to="diversity")
-    assert list(div.index) == ["Observed richness", "Shannon entropy", "Inverse Simpson", "Gini-Simpson"]
-    npt.assert_allclose(div.loc["Observed richness"].to_numpy(dtype=float), profile.loc[0].to_numpy(dtype=float))
-    npt.assert_allclose(div.loc["Shannon entropy"].to_numpy(dtype=float), np.log(profile.loc[1].to_numpy(dtype=float)))
-    npt.assert_allclose(div.loc["Inverse Simpson"].to_numpy(dtype=float), profile.loc[2].to_numpy(dtype=float))
-    npt.assert_allclose(div.loc["Gini-Simpson"].to_numpy(dtype=float), 1 - 1 / profile.loc[2].to_numpy(dtype=float))
+    div = ir.tl.convert_hill_table(profile)
+    assert list(div.columns) == ["Observed richness", "Shannon entropy", "Inverse Simpson", "Gini-Simpson"]
+    assert list(div.index) == ["A", "B"]
 
-    with pytest.raises(ValueError):
-        ir.tl.convert_hill_table(profile, convert_to="not_a_mode")
-
-
-def test_convert_hill_table_modes():
-    # operates on a plain DataFrame, so it needs no optional dependency
-    profile = pd.DataFrame({"A": [10.0, 6.0, 4.0], "B": [20.0, 12.0, 8.0]}, index=[0, 1, 2])
-
-    div = ir.tl.convert_hill_table(profile, convert_to="diversity")
-    npt.assert_allclose(div.loc["Shannon entropy"].to_numpy(dtype=float), np.log(profile.loc[1].to_numpy(dtype=float)))
-    npt.assert_allclose(div.loc["Gini-Simpson"].to_numpy(dtype=float), 1 - 1 / profile.loc[2].to_numpy(dtype=float))
-
-    ef = ir.tl.convert_hill_table(profile, convert_to="evenness_factor")
-    npt.assert_allclose(ef.to_numpy(dtype=float), (profile / profile.loc[0]).to_numpy(dtype=float))
-
-    rel = ir.tl.convert_hill_table(profile, convert_to="relative_evenness")
-    npt.assert_allclose(rel.to_numpy(dtype=float), (np.log(profile) / np.log(profile.loc[0])).to_numpy(dtype=float))
-
-    with pytest.raises(ValueError, match="Invalid"):
-        ir.tl.convert_hill_table(profile, convert_to="nope")
-
-    with pytest.raises(ValueError, match="missing diversity order"):
-        ir.tl.convert_hill_table(profile.drop(index=2), convert_to="diversity")
+    qd = profile.pivot(index="assemblage", columns="order_q", values="qD")
+    npt.assert_allclose(div["Observed richness"].to_numpy(dtype=float), qd[0].to_numpy(dtype=float))
+    npt.assert_allclose(div["Shannon entropy"].to_numpy(dtype=float), np.log(qd[1].to_numpy(dtype=float)))
+    npt.assert_allclose(div["Inverse Simpson"].to_numpy(dtype=float), qd[2].to_numpy(dtype=float))
+    npt.assert_allclose(div["Gini-Simpson"].to_numpy(dtype=float), 1 - 1 / qd[2].to_numpy(dtype=float))
 
 
-def test_hill_diversity_profile_requires_hillrep(monkeypatch):
-    import builtins
-
-    from scirpy.tl import _diversity
-
-    real_import = builtins.__import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "hillrep":
-            raise ImportError("simulated missing hillrep")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    with pytest.raises(ImportError, match="pip install hillrep"):
-        _diversity._import_hillrep()
+def test_convert_hill_table_requires_orders_012():
+    profile = pd.DataFrame(
+        {
+            "assemblage": ["A", "A", "B", "B"],
+            "order_q": [0.0, 1.0, 0.0, 1.0],
+            "qD": [10.0, 6.0, 20.0, 12.0],
+        }
+    )
+    with pytest.raises(ValueError, match="missing the diversity order"):
+        ir.tl.convert_hill_table(profile)

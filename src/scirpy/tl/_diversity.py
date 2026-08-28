@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Literal, cast
+from typing import cast
 
 import hillrep
 import numpy as np
@@ -130,61 +130,43 @@ def hill_diversity_profile(
     return tidy, assessment
 
 
-def convert_hill_table(
-    diversity_profile: pd.DataFrame,
-    convert_to: Literal["diversity", "evenness_factor", "relative_evenness"] = "diversity",
-) -> pd.DataFrame:
+def convert_hill_table(diversity_profile: pd.DataFrame) -> pd.DataFrame:
     """\
-    Converts a profile from :func:`~scirpy.tl.hill_diversity_profile` into other alpha diversity indices.
+    Converts a profile from :func:`~scirpy.tl.hill_diversity_profile` into the classical alpha diversity indices.
 
-    See :cite:`Daly.2018` for an overview of the indices and evenness measures.
+    The Hill numbers of order 0, 1 and 2 are monotone transformations of the observed
+    richness, the Shannon entropy and the inverse Simpson index, so the classical
+    indices can be recovered from the profile (:cite:`Daly.2018`). Because they are
+    derived from the coverage-standardized Hill numbers, they inherit the same depth
+    correction.
 
     Parameters
     ----------
     diversity_profile
-        A `DataFrame` produced by :func:`~scirpy.tl.hill_diversity_profile`. It must
-        contain the diversity orders `0`, `1` and `2` in its index.
-    convert_to
-        Which conversion to perform:
-
-        * `"diversity"` - the classical indices (observed richness, Shannon entropy,
-          inverse Simpson, Gini-Simpson) derived from the Hill numbers.
-        * `"evenness_factor"` - each Hill number divided by the observed richness.
-        * `"relative_evenness"` - the log of each Hill number over the log of the
-          observed richness.
+        The tidy `DataFrame` returned by :func:`~scirpy.tl.hill_diversity_profile`.
+        It must contain the diversity orders `0`, `1` and `2`.
 
     Returns
     -------
-    A `DataFrame` whose rows are the requested indices (or diversity orders) and whose
-    columns are the groups.
+    A `DataFrame` with one row per group and one column per index (observed richness,
+    Shannon entropy, inverse Simpson, Gini-Simpson).
     """
-    for required_q in (0, 1, 2):
-        if required_q not in diversity_profile.index:
-            raise ValueError(
-                f"The profile is missing diversity order q={required_q}. "
-                "`convert_hill_table` requires the orders 0, 1 and 2."
-            )
+    missing = [q for q in (0, 1, 2) if not (diversity_profile["order_q"] == q).any()]
+    if missing:
+        raise ValueError(
+            f"The profile is missing the diversity order(s) {missing}. "
+            "`convert_hill_table` requires the orders 0, 1 and 2."
+        )
 
-    if convert_to == "diversity":
-        richness = diversity_profile.loc[0]
-        inverse_simpson = diversity_profile.loc[2]
-        return pd.DataFrame(
-            {
-                "Observed richness": richness,
-                "Shannon entropy": np.log(diversity_profile.loc[1]),
-                "Inverse Simpson": inverse_simpson,
-                "Gini-Simpson": 1 - 1 / inverse_simpson,
-            }
-        ).T
-
-    if convert_to == "evenness_factor":
-        return diversity_profile / diversity_profile.loc[0]
-
-    if convert_to == "relative_evenness":
-        return np.log(diversity_profile) / np.log(diversity_profile.loc[0])
-
-    raise ValueError(
-        f"Invalid `convert_to` value {convert_to!r}. Choose 'diversity', 'evenness_factor' or 'relative_evenness'."
+    qd = diversity_profile.pivot(index="assemblage", columns="order_q", values="qD")
+    inverse_simpson = qd[2]
+    return pd.DataFrame(
+        {
+            "Observed richness": qd[0],
+            "Shannon entropy": np.log(qd[1]),
+            "Inverse Simpson": inverse_simpson,
+            "Gini-Simpson": 1 - 1 / inverse_simpson,
+        }
     )
 
 
